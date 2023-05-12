@@ -14,15 +14,32 @@ fn main() {
 
         let mut reader = BufReader::new(&stream);
         let mut writer = BufWriter::new(&stream);
+        let mut allow_pipeline = true;
 
-        while let Ok(Some(response)) = parse_resp(&mut reader) {
-            let debug = format!("response: {:?}", response);
+        println!("stream open, parsing buffer");
 
-            println!("{debug}");
+        loop {
+            let result = parse_resp(&mut reader, allow_pipeline);
 
-            writer.write(debug.as_bytes()).unwrap();
+            let (done, message) = match result {
+                Ok(response) => match response {
+                    Some(value) => (false, format!("value: {:?}", value)),
+                    None => (true, String::from("buffer empty")),
+                },
+                Err(error) => (true, format!("error: {:?}", error)),
+            };
+
+            println!("{message}");
+            
+            writer.write(message.as_bytes()).unwrap();
+
+            allow_pipeline = false;
+
+            if done {
+                break;
+            }
         }
 
-        writer.flush().unwrap();
+        println!("stream closing");
     }
 }

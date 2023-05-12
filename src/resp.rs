@@ -10,9 +10,9 @@ pub enum RespData {
     Error(String),
     Integer(i64),
     BulkString(String),
-    NilBulkString,
     Array(Vec<RespData>),
-    NilArray,
+    NullBulkString,
+    NullArray,
 }
 
 #[derive(Debug)]
@@ -48,7 +48,58 @@ impl From<TryFromIntError> for RespError {
     }
 }
 
-pub fn parse_resp(reader: &mut BufReader<&TcpStream>) -> Result<Option<RespData>, RespError> {
+trait ReaderExtensions {
+    fn read_crlf(&mut self) -> Result<(), RespError>;
+    fn read_until_crlf(&mut self) -> Result<String, RespError>;
+    fn read_i64(&mut self) -> Result<i64, RespError>;
+}
+
+impl ReaderExtensions for &mut BufReader<&TcpStream> {
+    fn read_crlf(&mut self) -> Result<(), RespError> {
+        let mut buf = [0; 2];
+
+        self.read_exact(&mut buf)?;
+
+        if buf[0] == b'\r' && buf[1] == b'\n' {
+            Ok(())
+        } else {
+            Err(RespError::MissingCRLF)
+        }
+    }
+
+    fn read_until_crlf(&mut self) -> Result<String, RespError> {
+        let mut write = Vec::new();
+        let mut buf = [0; 1];
+
+        loop {
+            if self.read(&mut buf)? == 0 {
+                break;
+            }
+
+            write.push(buf[0]);
+
+            let len = write.len();
+
+            if len > 1 && write[len - 2] == b'\r' && write[len - 1] == b'\n' {
+                write.truncate(len - 2);
+                break;
+            }
+        }
+
+        let string = String::from_utf8(write)?;
+
+        Ok(string)
+    }
+
+    fn read_i64(&mut self) -> Result<i64, RespError> {
+        Ok(self.read_until_crlf()?.parse::<i64>()?)
+    }
+}
+
+pub fn parse_resp(
+    reader: &mut BufReader<&TcpStream>,
+    allow_pipeline: bool,
+) -> Result<Option<RespData>, RespError> {
     let mut buf = [0];
 
     let n = reader.read(&mut buf)?;
@@ -57,74 +108,67 @@ pub fn parse_resp(reader: &mut BufReader<&TcpStream>) -> Result<Option<RespData>
         return Ok(None);
     }
 
-    Ok(Some(match buf[0] {
-        b'+' => parse_resp_string(reader)?,
-        b'-' => parse_resp_error(reader)?,
-        b':' => parse_resp_integer(reader)?,
-        b'*' => parse_resp_array(reader)?,
-        b'$' => parse_resp_bulk_string(reader)?,
-        _ => parse_resp_inline_command(reader, buf[0])?,
-    }))
-}
-
-fn parse_resp_string(reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
-    Ok(RespData::String(read_string(reader)?))
-}
-
-fn parse_resp_error(reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
-    Ok(RespData::Error(read_string(reader)?))
-}
-
-fn parse_resp_integer(reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
-    Ok(RespData::Integer(read_string(reader)?.parse::<i64>()?))
-}
-
-fn parse_resp_array(reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
-    Ok({
-        let length = read_i64(reader)?;
-
-        if length == -1 {
-            RespData::NilArray
-        } else {
-            let length = length.try_into()?;
-            let mut results = Vec::with_capacity(length);
-
-            while results.len() < length {
-                if let Some(item) = parse_resp(reader)? {
-                    results.push(item);
-                } else {
-                    break;
-                }
-            }
-
-            RespData::Array(results)
-        }
+    Ok(match buf[0] {
+        b'+' => Some(parse_resp_string(reader)?),
+        b'-' => Some(parse_resp_error(reader)?),
+        b':' => Some(parse_resp_integer(reader)?),
+        b'*' => Some(parse_resp_array(reader)?),
+        b'$' => Some(parse_resp_bulk_string(reader)?),
+        _ if allow_pipeline => Some(parse_pipeline(reader, buf[0])?),
+        _ => None,
     })
 }
 
-fn parse_resp_bulk_string(reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
-    Ok({
-        let length = read_i64(reader)?;
-
-        if length == -1 {
-            RespData::NilBulkString
-        } else {
-            let length = length.try_into()?;
-            let mut buf = vec![0; length];
-
-            reader.read_exact(&mut buf)?;
-
-            read_crlf(reader)?;
-
-            RespData::BulkString(String::from_utf8(buf)?)
-        }
-    })
+fn parse_resp_string(mut reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
+    Ok(RespData::String(reader.read_until_crlf()?))
 }
 
-fn parse_resp_inline_command(
-    reader: &mut BufReader<&TcpStream>,
-    first: u8,
-) -> Result<RespData, RespError> {
+fn parse_resp_error(mut reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
+    Ok(RespData::Error(reader.read_until_crlf()?))
+}
+
+fn parse_resp_integer(mut reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
+    Ok(RespData::Integer(reader.read_until_crlf()?.parse::<i64>()?))
+}
+
+fn parse_resp_array(mut reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
+    let length = reader.read_i64()?;
+
+    if length == -1 {
+        return Ok(RespData::NullArray);
+    }
+
+    let length = length.try_into()?;
+
+    let mut results = Vec::with_capacity(length);
+
+    while results.len() < length {
+        if let Some(item) = parse_resp(reader, false)? {
+            results.push(item);
+        } else {
+            break;
+        }
+    }
+
+    Ok(RespData::Array(results))
+}
+
+fn parse_resp_bulk_string(mut reader: &mut BufReader<&TcpStream>) -> Result<RespData, RespError> {
+    let length = reader.read_i64()?;
+
+    if length == -1 {
+        return Ok(RespData::NullBulkString);
+    }
+
+    let mut buf = vec![0; length.try_into()?];
+
+    reader.read_exact(&mut buf)?;
+    reader.read_crlf()?;
+
+    Ok(RespData::BulkString(String::from_utf8(buf)?))
+}
+
+fn parse_pipeline(reader: &mut BufReader<&TcpStream>, first: u8) -> Result<RespData, RespError> {
     let mut string = (first as char).to_string();
 
     reader.read_line(&mut string)?;
@@ -139,31 +183,4 @@ fn parse_resp_inline_command(
             })
             .collect(),
     ))
-}
-
-fn read_string(reader: &mut BufReader<&TcpStream>) -> Result<String, RespError> {
-    let mut string = String::new();
-    let n = reader.read_line(&mut string)?;
-
-    if n > 0 {
-        Ok(string)
-    } else {
-        Err(RespError::MissingCRLF) //Unexpected EOF
-    }
-}
-
-fn read_i64(reader: &mut BufReader<&TcpStream>) -> Result<i64, RespError> {
-    Ok(read_string(reader)?.parse::<i64>()?)
-}
-
-fn read_crlf(reader: &mut BufReader<&TcpStream>) -> Result<(), RespError> {
-    let mut buf = [0; 2];
-
-    reader.read_exact(&mut buf)?;
-
-    if buf[0] == b'\r' && buf[1] == b'\n' {
-        Ok(())
-    } else {
-        Err(RespError::MissingCRLF)
-    }
 }
