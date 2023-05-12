@@ -1,0 +1,1 @@
+*5\r\n+OK\r\n-ERR This is an error message\r\n:123456789\r\n$11\r\nHello World\r\n*5\r\n+OK\r\n-ERR Inside array\r\n:987654321\r\n$12\r\nInside array\r\n*2\r\n$4\r\nDeep\r\n$5\r\nArray\r\n
