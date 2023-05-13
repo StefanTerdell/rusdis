@@ -1,11 +1,11 @@
 # Rusdis
 
-Redis, but in Rust.
+It's a Redis server made in Rust.
 
-## Why?
+## But why?
 
-I'm trying to learn Rust and Redis.
+I'm learning Rust and Redis.
 
 ## Go outside
 
-No, u. 🦀
+No u 🦀🦀🦀
