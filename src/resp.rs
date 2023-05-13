@@ -1,4 +1,8 @@
-use std::{io::Read, net::TcpStream, num::TryFromIntError};
+use std::num::TryFromIntError;
+
+use async_recursion::async_recursion;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
 
 #[derive(Debug)]
 pub enum Data {
@@ -90,91 +94,87 @@ impl From<TryFromIntError> for ParseError {
     }
 }
 
-trait ReaderExtensions {
-    fn read_crlf(&mut self) -> Result<(), ParseError>;
-    fn read_until_crlf(&mut self) -> Result<String, ParseError>;
-    fn read_i64(&mut self) -> Result<i64, ParseError>;
-}
+async fn read_crlf(stream: &mut TcpStream) -> Result<(), ParseError> {
+    let mut buf = [0; 2];
 
-impl ReaderExtensions for &mut TcpStream {
-    fn read_crlf(&mut self) -> Result<(), ParseError> {
-        let mut buf = [0; 2];
+    stream.read_exact(&mut buf).await?;
 
-        self.read_exact(&mut buf)?;
-
-        if buf[0] == b'\r' && buf[1] == b'\n' {
-            Ok(())
-        } else {
-            Err(ParseError::MissingCRLF)
-        }
-    }
-
-    fn read_until_crlf(&mut self) -> Result<String, ParseError> {
-        let mut write = Vec::new();
-        let mut buf = [0; 1];
-
-        loop {
-            if self.read(&mut buf)? == 0 {
-                break;
-            }
-
-            write.push(buf[0]);
-
-            let len = write.len();
-
-            if len > 1 && write[len - 2] == b'\r' && write[len - 1] == b'\n' {
-                write.truncate(len - 2);
-                break;
-            }
-        }
-
-        let string = String::from_utf8(write)?;
-
-        Ok(string)
-    }
-
-    fn read_i64(&mut self) -> Result<i64, ParseError> {
-        Ok(self.read_until_crlf()?.parse::<i64>()?)
+    if buf[0] == b'\r' && buf[1] == b'\n' {
+        Ok(())
+    } else {
+        Err(ParseError::MissingCRLF)
     }
 }
 
-pub fn parse(
-    reader: &mut TcpStream,
+async fn read_until_crlf(stream: &mut TcpStream) -> Result<String, ParseError> {
+    let mut write = Vec::new();
+    let mut buf = [0; 1];
+
+    loop {
+        if stream.read(&mut buf).await? == 0 {
+            break;
+        }
+
+        write.push(buf[0]);
+
+        let len = write.len();
+
+        if len > 1 && write[len - 2] == b'\r' && write[len - 1] == b'\n' {
+            write.truncate(len - 2);
+            break;
+        }
+    }
+
+    let string = String::from_utf8(write)?;
+
+    Ok(string)
+}
+
+async fn read_i64(stream: &mut TcpStream) -> Result<i64, ParseError> {
+    Ok(read_until_crlf(stream).await?.parse::<i64>()?)
+}
+
+#[async_recursion]
+pub async fn parse(
+    stream: &mut TcpStream,
     allow_pipeline: bool,
 ) -> Result<Option<Data>, ParseError> {
     let mut buf = [0];
 
-    let n = reader.read(&mut buf)?;
+    let n = stream.read(&mut buf).await?;
 
     if n == 0 {
         return Ok(None);
     }
 
     Ok(match buf[0] {
-        b'+' => Some(parse_string(reader)?),
-        b'-' => Some(parse_error(reader)?),
-        b':' => Some(parse_integer(reader)?),
-        b'*' => Some(parse_array(reader)?),
-        b'$' => Some(parse_bulk_string(reader)?),
-        _ if allow_pipeline => Some(parse_pipeline(reader, buf[0])?),
+        b'+' => Some(parse_string(stream).await?),
+        b'-' => Some(parse_error(stream).await?),
+        b':' => Some(parse_integer(stream).await?),
+        b'*' => Some(parse_array(stream).await?),
+        b'$' => Some(parse_bulk_string(stream).await?),
+        _ if allow_pipeline => Some(parse_pipeline(stream, buf[0]).await?),
         _ => None,
     })
 }
 
-fn parse_string(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
-    Ok(Data::String(reader.read_until_crlf()?))
+async fn parse_string(stream: &mut TcpStream) -> Result<Data, ParseError> {
+    Ok(Data::String(read_until_crlf(stream).await?))
 }
 
-fn parse_error(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
-    Ok(Data::Error(reader.read_until_crlf()?))
+async fn parse_error(stream: &mut TcpStream) -> Result<Data, ParseError> {
+    Ok(Data::Error(read_until_crlf(stream).await?))
 }
 
-fn parse_integer(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
-    Ok(Data::Integer(reader.read_until_crlf()?.parse::<i64>()?))
+async fn parse_integer(stream: &mut TcpStream) -> Result<Data, ParseError> {
+    Ok(Data::Integer(
+        read_until_crlf(stream).await?.parse::<i64>()?,
+    ))
 }
 
-fn parse_array(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
-    let length = reader.read_i64()?;
+#[async_recursion]
+async fn parse_array(stream: &mut TcpStream) -> Result<Data, ParseError> {
+    let length = read_i64(stream).await?;
 
     if length == -1 {
         return Ok(Data::NullArray);
@@ -185,7 +185,7 @@ fn parse_array(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
     let mut results = Vec::with_capacity(length);
 
     while results.len() < length {
-        if let Some(item) = parse(reader, false)? {
+        if let Some(item) = parse(stream, false).await? {
             results.push(item);
         } else {
             break;
@@ -195,8 +195,8 @@ fn parse_array(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
     Ok(Data::Array(results))
 }
 
-fn parse_bulk_string(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
-    let length = reader.read_i64()?;
+async fn parse_bulk_string(stream: &mut TcpStream) -> Result<Data, ParseError> {
+    let length = read_i64(stream).await?;
 
     if length == -1 {
         return Ok(Data::NullBulkString);
@@ -204,16 +204,16 @@ fn parse_bulk_string(mut reader: &mut TcpStream) -> Result<Data, ParseError> {
 
     let mut buf = vec![0; length.try_into()?];
 
-    reader.read_exact(&mut buf)?;
-    reader.read_crlf()?;
+    stream.read_exact(&mut buf).await?;
+    read_crlf(stream).await?;
 
     Ok(Data::BulkString(String::from_utf8(buf)?))
 }
 
-fn parse_pipeline(mut reader: &mut TcpStream, first: u8) -> Result<Data, ParseError> {
+async fn parse_pipeline(stream: &mut TcpStream, first: u8) -> Result<Data, ParseError> {
     let mut string = (first as char).to_string();
 
-    string.extend(reader.read_until_crlf());
+    string.extend(read_until_crlf(stream).await);
 
     Ok(Data::Array(
         string
