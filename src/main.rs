@@ -2,7 +2,10 @@ mod commands;
 mod resp;
 mod store;
 
-use std::{io::Write, net::TcpListener};
+use std::{
+    io::Write,
+    net::{TcpListener, TcpStream},
+};
 
 fn main() {
     let mut store = store::HashMapStore::new();
@@ -10,43 +13,43 @@ fn main() {
 
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();
-        let mut allow_pipeline = true;
 
         println!("stream open, parsing buffer");
 
-        loop {
-            let message = resp::parse(&mut stream, allow_pipeline);
-            allow_pipeline = false;
+        let message = resp::parse(&mut stream, true);
 
-            if let Ok(Some(message)) = message {
-                if let resp::Data::Array(array) = message {
-                    if let Some(resp::Data::String(cmd)) = array.get(0) {
-                        let res = match cmd.as_str() {
-                            "PING" => commands::ping(),
-                            "SET" => commands::set(&mut store, &array),
-                            "GET" => commands::get(&store, &array),
-                            "DEL" => commands::del(&mut store, &array),
-                            _ => resp::ser_error("Unknown command"),
-                        };
-
-                        stream.write_all(&res).unwrap();
-                        stream.flush().unwrap();
-
-                        println!(
-                            "Sent '{}'",
-                            String::from_utf8(res[..res.len() - 2].to_vec())
-                                .unwrap()
-                                .replace("\r\n", "\\r\\n")
-                        );
-
-                        continue;
-                    }
-                }
+        if let Ok(Some(message)) = message {
+            if let resp::Data::Array(arr) = message {
+                handle_array(arr, &mut store, &mut stream)
             }
-
-            break;
         }
 
         println!("stream closing");
+    }
+}
+
+fn handle_array(arr: Vec<resp::Data>, store: &mut dyn store::Store, stream: &mut TcpStream) {
+    if let Some(cmd) = commands::get_arg(&arr, 0) {
+        let res = match cmd.as_str() {
+            "PING" => commands::ping(),
+            "SET" => commands::set(store, &arr),
+            "GET" => commands::get(store, &arr),
+            "DEL" => commands::del(store, &arr),
+            _ => resp::ser_error("Unknown command"),
+        };
+
+        stream.write_all(&res).unwrap();
+        stream.flush().unwrap();
+
+        println!(
+            "Sent '{}'",
+            String::from_utf8(res).unwrap().replace("\r\n", "\\r\\n")
+        );
+    } else {
+        for item in arr {
+            if let resp::Data::Array(inner) = item {
+                handle_array(inner, store, stream);
+            }
+        }
     }
 }
