@@ -1,13 +1,13 @@
 use crate::{resp, store::Store};
 
-pub fn get_arg(args: &Vec<resp::Data>, index: usize) -> Option<String> {
+pub fn get_arg(args: &[resp::Data], index: usize) -> Option<String> {
     match args.get(index) {
         Some(resp::Data::String(str) | resp::Data::BulkString(str)) => Some(str.to_string()),
         _ => None,
     }
 }
 
-pub fn get(store: &dyn Store, args: &Vec<resp::Data>) -> Vec<u8> {
+pub fn get(store: &dyn Store, args: &[resp::Data]) -> Vec<u8> {
     if let Some(key) = get_arg(args, 1) {
         let data = store.get(&key);
 
@@ -24,12 +24,12 @@ pub fn get(store: &dyn Store, args: &Vec<resp::Data>) -> Vec<u8> {
     resp::ser(resp::Data::Error(String::from("No key provided")))
 }
 
-pub fn set(store: &mut dyn Store, args: &Vec<resp::Data>) -> Vec<u8> {
+pub fn set(store: &mut dyn Store, args: &[resp::Data]) -> Vec<u8> {
     if let Some(key) = get_arg(args, 1) {
         if let Some(value) = get_arg(args, 2) {
             println!("cmd: SET, key: {}, value: {}", key, value);
 
-            store.set(&key, value.to_string());
+            store.set(&key, value);
 
             return resp::ser_string("OK");
         }
@@ -42,7 +42,7 @@ pub fn set(store: &mut dyn Store, args: &Vec<resp::Data>) -> Vec<u8> {
     resp::ser_error("No key provided")
 }
 
-pub fn del(store: &mut dyn Store, args: &Vec<resp::Data>) -> Vec<u8> {
+pub fn del(store: &mut dyn Store, args: &[resp::Data]) -> Vec<u8> {
     let keys = args[1..].iter().fold(Vec::new(), |mut acc, curr| {
         if let resp::Data::String(str) | resp::Data::BulkString(str) = curr {
             acc.push(str)

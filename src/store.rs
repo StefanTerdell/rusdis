@@ -1,7 +1,7 @@
 pub trait Store {
     fn get(&self, key: &str) -> Option<&String>;
     fn set(&mut self, key: &str, value: String);
-    fn del(&mut self, keys: &Vec<&String>) -> i64;
+    fn del(&mut self, keys: &[&String]) -> i64;
 }
 
 pub struct HashMapStore {
@@ -25,7 +25,7 @@ impl Store for HashMapStore {
         self.data.insert(key.to_owned(), value);
     }
 
-    fn del(&mut self, keys: &Vec<&String>) -> i64 {
+    fn del(&mut self, keys: &[&String]) -> i64 {
         keys.iter()
             .map(|key| {
                 if self.data.contains_key(*key) {

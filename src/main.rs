@@ -18,10 +18,8 @@ async fn main() {
 
         let message = resp::parse(&mut stream, true);
 
-        if let Ok(Some(message)) = message.await {
-            if let resp::Data::Array(arr) = message {
-                handle_array(arr, &mut store, &mut stream).await;
-            }
+        if let Ok(Some(resp::Data::Array(arr))) = message.await {
+            handle_array(arr, &mut store, &mut stream).await;
         }
 
         println!("stream closing");
