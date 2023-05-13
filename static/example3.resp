@@ -1,1 +1,1 @@
-*6\r\n*1\r\n+PING\r\n*3\r\n+SET\r\n+spurdo\r\n+spärde\r\n*2\r\n+GET\r\n+spurdo\r\n*2\r\n+DEL\r\n+spurdo\r\n*2\r\n+GET\r\n+spurdo\r\n*1\r\n+PING\r\n
+*6\r\n*1\r\n+PING\r\n*3\r\n+SET\r\n$6\r\nspurdo\r\n+spärde\r\n*2\r\n+GET\r\n+spurdo\r\n*2\r\n+DEL\r\n+spurdo\r\n*2\r\n+GET\r\n+spurdo\r\n*1\r\n+PING\r\n
