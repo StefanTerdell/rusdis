@@ -3,51 +3,92 @@ mod resp;
 mod store;
 
 use async_recursion::async_recursion;
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use store::HashMapStore;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
-    let mut store = store::HashMapStore::new();
+    let store = Arc::new(RwLock::new(store::HashMapStore::new()));
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
 
     loop {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, address) = listener.accept().await.unwrap();
+        println!("New TCP connection to {}", address);
+        let store = Arc::clone(&store);
 
-        println!("stream open, parsing buffer");
+        tokio::spawn(async move {
+            let mut buffer = [0; 1024];
+            loop {
+                match stream.read(&mut buffer).await {
+                    Ok(n) if n == 0 => {
+                        // connection was closed
+                        break;
+                    }
+                    Ok(n) => {
+                        let message = resp::parse(&mut buffer[..n].iter(), true);
 
-        let message = resp::parse(&mut stream, true);
+                        let mut results = Vec::new();
 
-        if let Ok(Some(resp::Data::Array(arr))) = message.await {
-            handle_array(arr, &mut store, &mut stream).await;
-        }
+                        if let Ok(Some(resp::Data::Array(arr))) = message {
+                            execute_commands(arr, Arc::clone(&store), &mut results).await;
 
-        println!("stream closing");
+                            stream.write_all(&results).await.unwrap();
+                            stream.flush().await.unwrap();
+
+                            println!(
+                                "Sent {} to {}",
+                                String::from_utf8(results)
+                                    .unwrap()
+                                    .replace("\r\n", "\\r\\n"),
+                                address
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("failed to read from socket; err = {:?}", e);
+                        break;
+                    }
+                }
+            }
+        });
     }
 }
 
-#[async_recursion(?Send)]
-async fn handle_array(arr: Vec<resp::Data>, store: &mut dyn store::Store, stream: &mut TcpStream) {
+#[async_recursion]
+async fn execute_commands(
+    arr: Vec<resp::Data>,
+    store: Arc<RwLock<HashMapStore>>,
+    acc: &mut Vec<u8>,
+) {
     if let Some(cmd) = commands::get_arg(&arr, 0) {
+        println!("Sleeping 1");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
         let res = match cmd.as_str() {
             "PING" => commands::ping(),
-            "SET" => commands::set(store, &arr),
-            "GET" => commands::get(store, &arr),
-            "DEL" => commands::del(store, &arr),
+            "SET" => {
+                let mut store_lock = store.write().await;
+                commands::set(&mut *store_lock, &arr)
+            }
+            "GET" => {
+                let store_lock = store.read().await;
+                commands::get(&*store_lock, &arr)
+            }
+            "DEL" => {
+                let mut store_lock = store.write().await;
+                commands::del(&mut *store_lock, &arr)
+            }
             _ => resp::ser_error("Unknown command"),
         };
 
-        stream.write_all(&res).await.unwrap();
-        stream.flush().await.unwrap();
-
-        println!(
-            "Sent '{}'",
-            String::from_utf8(res).unwrap().replace("\r\n", "\\r\\n")
-        );
+        acc.extend(&res);
     } else {
         for item in arr {
             if let resp::Data::Array(inner) = item {
-                handle_array(inner, store, stream).await;
+                execute_commands(inner, Arc::clone(&store), acc).await;
             }
         }
     }

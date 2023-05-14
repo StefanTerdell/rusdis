@@ -1,8 +1,4 @@
-use std::num::TryFromIntError;
-
-use async_recursion::async_recursion;
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use std::{num::TryFromIntError, slice::Iter};
 
 #[derive(Debug)]
 pub enum Data {
@@ -68,6 +64,7 @@ pub enum ParseError {
     Utf8(std::string::FromUtf8Error),
     NegativeInt,
     MissingCRLF,
+    UnexpectedEnding,
 }
 
 impl From<std::io::Error> for ParseError {
@@ -94,87 +91,83 @@ impl From<TryFromIntError> for ParseError {
     }
 }
 
-async fn read_crlf(stream: &mut TcpStream) -> Result<(), ParseError> {
-    let mut buf = [0; 2];
+fn read_crlf(read_buf: &mut Iter<u8>) -> Result<(), ParseError> {
+    if let Ok(x) = read_exact(read_buf, 2) {
+        if x == "\r\n" {
+            return Ok(());
+        }
+    }
 
-    stream.read_exact(&mut buf).await?;
+    Err(ParseError::MissingCRLF)
+}
 
-    if buf[0] == b'\r' && buf[1] == b'\n' {
-        Ok(())
+fn read_exact(read_buf: &mut Iter<u8>, length: usize) -> Result<String, ParseError> {
+    let mut write_buf = Vec::with_capacity(length);
+
+    while let Some(x) = read_buf.next() {
+        write_buf.push(*x);
+
+        if write_buf.len() == length {
+            return Ok(String::from_utf8(write_buf)?);
+        }
+    }
+
+    Err(ParseError::UnexpectedEnding)
+}
+
+fn read_until_crlf(read_buf: &mut Iter<u8>) -> Result<String, ParseError> {
+    let mut write_buf = Vec::new();
+    let mut last = [0, 0];
+
+    while let Some(x) = read_buf.next() {
+        last[0] = last[1];
+        last[1] = *x;
+
+        if last[0] == b'\r' && last[1] == b'\n' {
+            write_buf.truncate(write_buf.len() - 1);
+            break;
+        }
+
+        write_buf.push(*x);
+    }
+
+    Ok(String::from_utf8(write_buf)?)
+}
+
+fn read_i64(read_buf: &mut Iter<u8>) -> Result<i64, ParseError> {
+    Ok(read_until_crlf(read_buf)?.parse::<i64>()?)
+}
+
+pub fn parse(read_buf: &mut Iter<u8>, allow_pipeline: bool) -> Result<Option<Data>, ParseError> {
+    if let Some(x) = read_buf.next() {
+        Ok(match x {
+            b'+' => Some(parse_string(read_buf)?),
+            b'-' => Some(parse_error(read_buf)?),
+            b':' => Some(parse_integer(read_buf)?),
+            b'*' => Some(parse_array(read_buf)?),
+            b'$' => Some(parse_bulk_string(read_buf)?),
+            _ if allow_pipeline => Some(parse_pipeline(read_buf, *x)?),
+            _ => None,
+        })
     } else {
-        Err(ParseError::MissingCRLF)
+        Ok(None)
     }
 }
 
-async fn read_until_crlf(stream: &mut TcpStream) -> Result<String, ParseError> {
-    let mut write = Vec::new();
-    let mut buf = [0; 1];
-
-    loop {
-        if stream.read(&mut buf).await? == 0 {
-            break;
-        }
-
-        write.push(buf[0]);
-
-        let len = write.len();
-
-        if len > 1 && write[len - 2] == b'\r' && write[len - 1] == b'\n' {
-            write.truncate(len - 2);
-            break;
-        }
-    }
-
-    let string = String::from_utf8(write)?;
-
-    Ok(string)
+fn parse_string(read_buf: &mut Iter<u8>) -> Result<Data, ParseError> {
+    Ok(Data::String(read_until_crlf(read_buf)?))
 }
 
-async fn read_i64(stream: &mut TcpStream) -> Result<i64, ParseError> {
-    Ok(read_until_crlf(stream).await?.parse::<i64>()?)
+fn parse_error(read_buf: &mut Iter<u8>) -> Result<Data, ParseError> {
+    Ok(Data::Error(read_until_crlf(read_buf)?))
 }
 
-#[async_recursion]
-pub async fn parse(
-    stream: &mut TcpStream,
-    allow_pipeline: bool,
-) -> Result<Option<Data>, ParseError> {
-    let mut buf = [0];
-
-    let n = stream.read(&mut buf).await?;
-
-    if n == 0 {
-        return Ok(None);
-    }
-
-    Ok(match buf[0] {
-        b'+' => Some(parse_string(stream).await?),
-        b'-' => Some(parse_error(stream).await?),
-        b':' => Some(parse_integer(stream).await?),
-        b'*' => Some(parse_array(stream).await?),
-        b'$' => Some(parse_bulk_string(stream).await?),
-        _ if allow_pipeline => Some(parse_pipeline(stream, buf[0]).await?),
-        _ => None,
-    })
+fn parse_integer(read_buf: &mut Iter<u8>) -> Result<Data, ParseError> {
+    Ok(Data::Integer(read_until_crlf(read_buf)?.parse::<i64>()?))
 }
 
-async fn parse_string(stream: &mut TcpStream) -> Result<Data, ParseError> {
-    Ok(Data::String(read_until_crlf(stream).await?))
-}
-
-async fn parse_error(stream: &mut TcpStream) -> Result<Data, ParseError> {
-    Ok(Data::Error(read_until_crlf(stream).await?))
-}
-
-async fn parse_integer(stream: &mut TcpStream) -> Result<Data, ParseError> {
-    Ok(Data::Integer(
-        read_until_crlf(stream).await?.parse::<i64>()?,
-    ))
-}
-
-#[async_recursion]
-async fn parse_array(stream: &mut TcpStream) -> Result<Data, ParseError> {
-    let length = read_i64(stream).await?;
+fn parse_array(read_buf: &mut Iter<u8>) -> Result<Data, ParseError> {
+    let length = read_i64(read_buf)?;
 
     if length == -1 {
         return Ok(Data::NullArray);
@@ -184,39 +177,38 @@ async fn parse_array(stream: &mut TcpStream) -> Result<Data, ParseError> {
 
     let mut results = Vec::with_capacity(length);
 
-    while results.len() < length {
-        if let Some(item) = parse(stream, false).await? {
-            results.push(item);
-        } else {
-            break;
+    while let Ok(Some(item)) = parse(read_buf, false) {
+        results.push(item);
+
+        if results.len() == length {
+            return Ok(Data::Array(results));
         }
     }
 
-    Ok(Data::Array(results))
+    Err(ParseError::UnexpectedEnding)
 }
 
-async fn parse_bulk_string(stream: &mut TcpStream) -> Result<Data, ParseError> {
-    let length = read_i64(stream).await?;
+fn parse_bulk_string(read_buf: &mut Iter<u8>) -> Result<Data, ParseError> {
+    let length = read_i64(read_buf)?;
 
     if length == -1 {
         return Ok(Data::NullBulkString);
     }
 
-    let mut buf = vec![0; length.try_into()?];
+    let content = read_exact(read_buf, length.try_into()?)?;
 
-    stream.read_exact(&mut buf).await?;
-    read_crlf(stream).await?;
+    read_crlf(read_buf)?;
 
-    Ok(Data::BulkString(String::from_utf8(buf)?))
+    Ok(Data::BulkString(content))
 }
 
-async fn parse_pipeline(stream: &mut TcpStream, first: u8) -> Result<Data, ParseError> {
-    let mut string = (first as char).to_string();
+fn parse_pipeline(read_buf: &mut Iter<u8>, first: u8) -> Result<Data, ParseError> {
+    let mut content = (first as char).to_string();
 
-    string.extend(read_until_crlf(stream).await);
+    content.extend(read_until_crlf(read_buf));
 
     Ok(Data::Array(
-        string
+        content
             .split(' ')
             .filter(|slice| !slice.is_empty())
             .map(|slice| match slice.parse::<i64>() {
