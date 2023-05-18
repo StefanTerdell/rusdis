@@ -104,7 +104,7 @@ fn read_crlf(read_buf: &mut Iter<u8>) -> Result<(), ParseError> {
 fn read_exact(read_buf: &mut Iter<u8>, length: usize) -> Result<String, ParseError> {
     let mut write_buf = Vec::with_capacity(length);
 
-    while let Some(x) = read_buf.next() {
+    for x in read_buf {
         write_buf.push(*x);
 
         if write_buf.len() == length {
@@ -119,7 +119,7 @@ fn read_until_crlf(read_buf: &mut Iter<u8>) -> Result<String, ParseError> {
     let mut write_buf = Vec::new();
     let mut last = [0, 0];
 
-    while let Some(x) = read_buf.next() {
+    for x in read_buf {
         last[0] = last[1];
         last[1] = *x;
 
