@@ -1,5 +1,6 @@
+use rusdis::resp;
+
 mod commands;
-mod resp;
 mod store;
 
 use async_recursion::async_recursion;
@@ -21,10 +22,12 @@ async fn main() {
 
         tokio::spawn(async move {
             let mut buffer = [0; 1024];
+
             loop {
                 match stream.read(&mut buffer).await {
                     Ok(n) if n == 0 => {
                         // connection was closed
+                        println!("Connection closed from {}", address);
                         break;
                     }
                     Ok(n) => {
@@ -64,9 +67,6 @@ async fn execute_commands(
     acc: &mut Vec<u8>,
 ) {
     if let Some(cmd) = commands::get_arg(&arr, 0) {
-        println!("Sleeping 1");
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
         let res = match cmd.as_str() {
             "PING" => commands::ping(),
             "SET" => {
