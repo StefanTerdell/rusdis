@@ -125,13 +125,13 @@ fn read_until_crlf(read_buf: &mut Iter<u8>) -> Result<String, ParseError> {
 
         if last[0] == b'\r' && last[1] == b'\n' {
             write_buf.truncate(write_buf.len() - 1);
-            break;
+            return Ok(String::from_utf8(write_buf)?);
         }
 
         write_buf.push(*x);
     }
 
-    Ok(String::from_utf8(write_buf)?)
+    Err(ParseError::MissingCRLF)
 }
 
 fn read_i64(read_buf: &mut Iter<u8>) -> Result<i64, ParseError> {
