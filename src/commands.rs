@@ -45,7 +45,7 @@ pub fn set(store: &mut dyn Store, args: &[resp::Data]) -> Vec<u8> {
 pub fn del(store: &mut dyn Store, args: &[resp::Data]) -> Vec<u8> {
     let keys = args[1..].iter().fold(Vec::new(), |mut acc, curr| {
         if let resp::Data::String(str) | resp::Data::BulkString(str) = curr {
-            acc.push(str)
+            acc.push(str);
         }
 
         acc
